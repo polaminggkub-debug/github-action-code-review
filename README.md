@@ -19,6 +19,8 @@ Create the file and paste this YAML verbatim.
 
 name: AI Code Review (GitHub Models Free)
 
+name: AI Code Review (GitHub Models Free)
+
 on:
   pull_request:
     types: [opened, synchronize]
@@ -35,22 +37,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.head_ref }}
+          fetch-depth: 0  # Fetch full history for proper diff comparison
 
       - name: Get Changed Files
         id: files
         run: |
-          git fetch --all || true
+          # Fetch base branch to ensure we have it for comparison
+          git fetch origin ${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}
 
-          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD || true)
+          # Get the merge base between the base branch and PR head
+          MERGE_BASE=$(git merge-base origin/${{ github.base_ref }} HEAD)
+          echo "Merge base: $MERGE_BASE"
+
+          # Get changed files between merge base and PR head
+          CHANGED=$(git diff --name-only "$MERGE_BASE"...HEAD || true)
 
           if [ -z "$CHANGED" ]; then
+            echo "No changes detected via merge-base, trying HEAD~1"
             CHANGED=$(git diff --name-only HEAD~1 || true)
           fi
 
           if [ -z "$CHANGED" ]; then
+            echo "No changes via HEAD~1, using diff-tree"
             CHANGED=$(git diff-tree --no-commit-id --name-only -r HEAD || true)
           fi
+
+          echo "Changed files:"
+          echo "$CHANGED"
 
           echo "FILES<<EOF" >> $GITHUB_ENV
           echo "$CHANGED" >> $GITHUB_ENV
@@ -59,23 +72,52 @@ jobs:
       - name: Build Review Payload
         id: payload
         run: |
-          PAYLOAD=""
-          for f in ${{ env.FILES }}; do
-            if [ -f "$f" ]; then
-              FULL=$(sed 's/"/\\"/g' "$f")
-              DIFF=$(git diff origin/${{ github.base_ref }}...HEAD -- "$f" | sed 's/"/\\"/g')
-
-              PAYLOAD+="\n\n========================================\n"
-              PAYLOAD+="FILE: $f\n"
-              PAYLOAD+="------------ FULL FILE --------------\n$FULL\n"
-              PAYLOAD+="------------ DIFF CHANGES -----------\n$DIFF\n"
-              PAYLOAD+="========================================\n"
+          echo "Detected changed files:"
+          echo "$FILES"
+          
+          # Get merge base for consistent diff
+          MERGE_BASE=$(git merge-base origin/${{ github.base_ref }} HEAD)
+          echo "Using merge base: $MERGE_BASE"
+          
+          FILE_COUNT=0
+          PAYLOAD_FILE=$(mktemp)
+          
+          # Read FILES line by line to handle newlines properly
+          while IFS= read -r f || [ -n "$f" ]; do
+            if [ -n "$f" ] && [ -f "$f" ]; then
+              FILE_COUNT=$((FILE_COUNT + 1))
+              echo "Processing file $FILE_COUNT: $f"
+              
+              # Append file content and diff to payload file (plain text, no escaping)
+              {
+                echo ""
+                echo "========================================"
+                echo "FILE: $f"
+                echo "------------ FULL FILE --------------"
+                cat "$f"
+                echo ""
+                echo "------------ DIFF CHANGES -----------"
+                git diff "$MERGE_BASE"...HEAD -- "$f" || true
+                echo "========================================"
+              } >> "$PAYLOAD_FILE"
             fi
-          done
-
-          echo "REVIEW<<EOF" >> $GITHUB_ENV
-          echo -e "$PAYLOAD" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
+          done <<< "$FILES"
+          
+          echo "Total files processed: $FILE_COUNT"
+          
+          if [ $FILE_COUNT -eq 0 ]; then
+            echo "ERROR: No files to review!"
+            exit 1
+          fi
+          
+          # Write to GITHUB_ENV using heredoc (preserves newlines)
+          {
+            echo "REVIEW<<EOF"
+            cat "$PAYLOAD_FILE"
+            echo "EOF"
+          } >> $GITHUB_ENV
+          
+          echo "Payload written to REVIEW env var ($(wc -c < "$PAYLOAD_FILE") bytes)"
 
       - name: Run AI Code Review (GPT-4o Mini)
         id: ai
@@ -87,14 +129,42 @@ jobs:
             "messages": [
               {
                 "role": "user",
-                "content": "Perform a complete and careful code review.\n\nReview Goals:\n- Read the full content of each modified file.\n- Use the diff as context.\n- Identify logic bugs, missing checks, unsafe assumptions, crash risks, security issues, concurrency problems, redundant code, and dangerous changes.\n\nRules:\n- Do NOT rewrite entire files.\n- Provide minimal, safe, actionable fixes.\n- Flag anything suspicious.\n\nRequired Output Format:\n## AI Code Review Summary\n\n### Critical Issues\n- (list)\n\n### Major Issues\n- (list)\n\n### Minor Issues\n- (list)\n\n---\n\n## File-by-File Review\n\n### <filename>\n#### Critical\n- \n#### Major\n- \n#### Minor\n- \n#### Suggested Fixes\n- \n\n---\n\n## Additional Observations\n- (optional)\n\nModified files (full content + diff):\n\n"
+                "content": "Perform a complete and careful code review.\n\nReview Goals:\n- Read the full content of each modified file.\n- Use the diff as context.\n- Identify logic bugs, missing checks, unsafe assumptions, crash risks, security issues, concurrency problems, redundant code, and dangerous changes.\n\nRules:\n- Do NOT rewrite entire files.\n- Provide minimal, safe, actionable fixes with BEFORE/AFTER code diffs.\n- Flag anything suspicious.\n- Use the ACTUAL filename from the provided files, not placeholder text.\n- Show code changes in diff format (- for removed lines, + for added lines).\n\nRequired Output Format (use emojis exactly as shown):\n## 🔍 AI Code Review Summary\n\n### 🔴 Critical Issues\n- (list or 'None identified')\n\n### 🟠 Major Issues\n- (list or 'None identified')\n\n### 🟡 Minor Issues\n- (list or 'None identified')\n\n---\n\n## 📁 File-by-File Review\n\nFor EACH file in the diff, create a section like this:\n\n### 📄 `actual_filename.ext`\n\n| Severity | Issue |\n|----------|-------|\n| 🔴 Critical | (description or 'None') |\n| 🟠 Major | (description or 'None') |\n| 🟡 Minor | (description or 'None') |\n\n**🛠️ Suggested Fixes:**\n\nFor each issue, show the fix as a code diff:\n\n```diff\ndef function_name():\n-    old_buggy_code = \"bad\"\n-    more_old_code()\n+    new_fixed_code = \"good\"\n+    better_approach()\n```\n\n**Explanation:** Brief reason why this fix is better.\n\n---\n\n## 💡 Additional Observations\n- (optional tips, best practices, or praise for good code)\n\nModified files (full content + diff):\n\n"
               }
             ]
           }
           JSONEOF
 
-          # Inject payload
-          jq --arg content "${{ env.REVIEW }}" '.messages[0].content += $content' request.json > payload.json
+          # Check if REVIEW env var has content
+          if [ -z "$REVIEW" ]; then
+            echo "ERROR: REVIEW env var is empty!"
+            echo "FILES env var: $FILES"
+            exit 1
+          fi
+          
+          echo "REVIEW env var length: ${#REVIEW} characters"
+          
+          # Write REVIEW content to temp file (preserve newlines)
+          printf '%s' "$REVIEW" > review_content.txt
+          
+          # Verify content file was created
+          if [ ! -s review_content.txt ]; then
+            echo "ERROR: review_content.txt is empty!"
+            exit 1
+          fi
+          
+          echo "Content file size: $(wc -c < review_content.txt) bytes"
+          
+          # Inject payload using rawfile (jq handles JSON escaping automatically)
+          jq --rawfile content review_content.txt '.messages[0].content += $content' request.json > payload.json
+          
+          # Verify payload was created
+          if [ ! -f payload.json ] || [ ! -s payload.json ]; then
+            echo "ERROR: payload.json is empty or missing!"
+            exit 1
+          fi
+          
+          echo "Payload created successfully"
 
           # Call GitHub Models API
           RESPONSE=$(curl -s \
@@ -109,17 +179,33 @@ jobs:
           echo "$RESPONSE" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
+      - name: Write Comment Body to File
+        run: |
+          cat > comment.md << 'EOF'
+          ## 🤖 AI Code Review
+          
+          <table>
+          <tr><td>🧠 <b>Model</b></td><td>GPT-4o Mini</td></tr>
+          <tr><td>📊 <b>Status</b></td><td>✅ Review Complete</td></tr>
+          </table>
+
+          ---
+          
+          EOF
+          echo "$AI_RESPONSE" >> comment.md
+          cat >> comment.md << 'EOF'
+          
+          ---
+          <sub>🔄 Powered by GitHub Models • Review generated automatically on PR</sub>
+          EOF
+
       - name: Comment Review to PR
         uses: peter-evans/create-or-update-comment@v3
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           issue-number: ${{ github.event.pull_request.number }}
-          body: |
-            ### AI Code Review (GitHub Models Free)
-            Model: GPT-4o Mini
+          body-path: comment.md
 
-            ---
-            ${{ env.AI_RESPONSE }}
 ```
 
 ---
