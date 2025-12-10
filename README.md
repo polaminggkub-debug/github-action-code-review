@@ -1,3 +1,6 @@
+<img width="842" height="727" alt="image" src="https://github.com/user-attachments/assets/344af9c9-0c20-4973-824b-6c6b63bbfea2" />
+
+
 # AI Code Review GitHub Action
 
 Free AI-powered code review using GitHub Models (GPT-4o Mini).
