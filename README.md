@@ -124,6 +124,19 @@ jobs:
 
 ---
 
+## How It Works
+
+1. **Copy** the block above (click 📋 button)
+2. **Paste** into your AI assistant (Cursor, ChatGPT, Claude)
+3. **Commit & Push** the file it creates
+4. **Create a Pull Request** to any branch
+5. **Wait ~30 seconds** for the AI to review
+6. **See the result** → Go to your Pull Request page → Scroll down to **Comments** section → AI review will appear there! 💬
+
+![Where to find the review](https://docs.github.com/assets/cb-35103/mw-1440/images/help/pull_requests/conversation-tab.webp)
+
+---
+
 ## Features
 
 - 🤖 Uses GitHub Models Free (GPT-4o Mini)
